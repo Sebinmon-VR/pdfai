@@ -241,14 +241,34 @@ document.addEventListener('DOMContentLoaded', () => {
         for (let i = 0; i < totalPages; i++) {
             const div = document.createElement('div');
             div.className = 'page-list-item';
-            div.innerHTML = `
-                <input type="checkbox" id="page-chk-${i}" value="${i}" checked>
-                <label for="page-chk-${i}">Page ${i + 1}</label>
-            `;
+
+            const chk = document.createElement('input');
+            chk.type = 'checkbox';
+            chk.id = `page-chk-${i}`;
+            chk.value = i;
+            chk.checked = true;
+            div.appendChild(chk);
+
+            const lbl = document.createElement('label');
+            lbl.htmlFor = `page-chk-${i}`;
+            lbl.innerText = `Page ${i + 1}`;
+            div.appendChild(lbl);
+
+            // "Go to page" button
+            const gotoBtn = document.createElement('button');
+            gotoBtn.className = 'goto-page-btn';
+            gotoBtn.title = `Go to Page ${i + 1}`;
+            gotoBtn.innerText = '▶';
+            gotoBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await loadPage(i);
+            });
+            div.appendChild(gotoBtn);
+
             pageListContent.appendChild(div);
         }
 
-        // Add event listeners to checkboxes specifically to update count on change
+        // Add event listeners to checkboxes to update count on change
         const checkboxes = pageListContent.querySelectorAll('input[type="checkbox"]');
         checkboxes.forEach(cb => {
             cb.addEventListener('change', updateSelectionCount);
@@ -343,34 +363,48 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 data.results.forEach(targetResult => {
                     const pIdx = targetResult.page_index;
-
-                    // We will completely overwrite this page's selection with the AI result
                     selectionsByPage[pIdx] = [];
 
                     targetResult.regions.forEach(aiBox => {
                         boxCounter++;
-                        // Map the PDF coords back to UI bounds
                         const uiX0 = aiBox.x0 * scaleX;
                         const uiY0 = aiBox.y0 * scaleY;
                         const uiX1 = aiBox.x1 * scaleX;
                         const uiY1 = aiBox.y1 * scaleY;
 
-                        selectionsByPage[pIdx].push({
-                            id: `Smart Region ${boxCounter}`,
-                            x0: uiX0,
-                            y0: uiY0,
-                            w: uiX1 - uiX0,
-                            h: uiY1 - uiY0,
-                            pdfX0: aiBox.x0,
-                            pdfY0: aiBox.y0,
-                            pdfX1: aiBox.x1,
-                            pdfY1: aiBox.y1
+                        // Deduplication: check if a nearly-identical box already exists for this page
+                        const OVERLAP_THRESHOLD = 0.6;
+                        const isDuplicate = selectionsByPage[pIdx].some(existing => {
+                            const interX0 = Math.max(existing.x0, uiX0);
+                            const interY0 = Math.max(existing.y0, uiY0);
+                            const interX1 = Math.min(existing.x0 + existing.w, uiX1);
+                            const interY1 = Math.min(existing.y0 + existing.h, uiY1);
+                            if (interX1 <= interX0 || interY1 <= interY0) return false;
+                            const interArea = (interX1 - interX0) * (interY1 - interY0);
+                            const boxArea = (uiX1 - uiX0) * (uiY1 - uiY0);
+                            return boxArea > 0 && (interArea / boxArea) >= OVERLAP_THRESHOLD;
                         });
+
+                        if (!isDuplicate) {
+                            selectionsByPage[pIdx].push({
+                                id: `Smart Region ${boxCounter}`,
+                                x0: uiX0, y0: uiY0,
+                                w: uiX1 - uiX0, h: uiY1 - uiY0,
+                                pdfX0: aiBox.x0, pdfY0: aiBox.y0,
+                                pdfX1: aiBox.x1, pdfY1: aiBox.y1
+                            });
+                        }
                     });
                 });
 
-                alert(`AI Smart Match complete! The regions on the selected pages have been resized to wrap the logical content. Please review them.`);
                 updateSelectionCount();
+                // Navigate to the first updated page so user can verify
+                const firstUpdatedPage = data.results[0]?.page_index;
+                if (firstUpdatedPage !== undefined && firstUpdatedPage !== currentPageIndex) {
+                    await loadPage(firstUpdatedPage);
+                } else {
+                    renderBoxesForCurrentPage();
+                }
             } else {
                 alert(`AI Smart Match failed: ${data.error}`);
             }
@@ -828,7 +862,66 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Populate JSON Tab
         if (allJsonItems.length > 0) {
-            jsonContainer.innerText = JSON.stringify(allJsonItems, null, 2);
+            const jsonStr = JSON.stringify(allJsonItems, null, 2);
+            jsonContainer.innerText = jsonStr;
+
+            // Inject/update action toolbar above the JSON output
+            let jsonTabPane = jsonContainer.parentElement;
+            let toolbar = jsonTabPane.querySelector('.json-toolbar');
+            if (!toolbar) {
+                toolbar = document.createElement('div');
+                toolbar.className = 'json-toolbar';
+                toolbar.innerHTML = `
+                    <button id="copy-json-btn" class="icon-action-btn" title="Copy JSON to clipboard">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button id="download-json-btn" class="icon-action-btn" title="Download JSON file">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    </button>
+                `;
+                jsonTabPane.appendChild(toolbar);
+
+                toolbar.querySelector('#copy-json-btn').addEventListener('click', () => {
+                    navigator.clipboard.writeText(jsonStr).then(() => {
+                        const btn = toolbar.querySelector('#copy-json-btn');
+                        btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+                        setTimeout(() => {
+                            btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+                        }, 1800);
+                    });
+                });
+
+                toolbar.querySelector('#download-json-btn').addEventListener('click', () => {
+                    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = 'extracted_data.json';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                });
+            } else {
+                // Update the copy handler closure with fresh jsonStr
+                const copyBtn = toolbar.querySelector('#copy-json-btn');
+                const dlBtn = toolbar.querySelector('#download-json-btn');
+                copyBtn.onclick = () => {
+                    navigator.clipboard.writeText(jsonStr).then(() => {
+                        copyBtn.innerText = '✔ Copied!';
+                        setTimeout(() => { copyBtn.innerText = '📋 Copy JSON'; }, 1800);
+                    });
+                };
+                dlBtn.onclick = () => {
+                    const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = 'extracted_data.json';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                };
+            }
         } else {
             jsonContainer.innerText = "No structured JSON data available.";
         }
